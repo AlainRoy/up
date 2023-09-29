@@ -16,10 +16,13 @@ package controlplane
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/alecthomas/kong"
 	"github.com/pterm/pterm"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 
 	"github.com/upbound/up-sdk-go/service/common"
 	cp "github.com/upbound/up-sdk-go/service/controlplanes"
@@ -48,11 +51,14 @@ func (c *listCmd) AfterApply(kongCtx *kong.Context, upCtx *upbound.Context) erro
 type listCmd struct{}
 
 // Run executes the list command.
-func (c *listCmd) Run(printer upterm.ObjectPrinter, p pterm.TextPrinter, cc *cp.Client, upCtx *upbound.Context) error {
+func (c *listCmd) Run(printer upterm.ObjectPrinter, p pterm.TextPrinter, cc *cp.Client, kube *dynamic.DynamicClient, upCtx *upbound.Context) error {
 	if upCtx.Profile.IsSpace() {
-		return fmt.Errorf("list is not supported for space profile %q", upCtx.ProfileName)
+		return c.runSpaces(printer, p, kube, upCtx)
 	}
+	return c.runUpbound(printer, p, cc, upCtx)
+}
 
+func (c *listCmd) runUpbound(printer upterm.ObjectPrinter, p pterm.TextPrinter, cc *cp.Client, upCtx *upbound.Context) error {
 	// TODO(hasheddan): we currently just max out single page size, but we
 	// may opt to support limiting page size and iterating through pages via
 	// flags in the future.
@@ -65,6 +71,31 @@ func (c *listCmd) Run(printer upterm.ObjectPrinter, p pterm.TextPrinter, cc *cp.
 		return nil
 	}
 	return printer.Print(cpList.ControlPlanes, fieldNames, extractFields)
+}
+
+func (c *listCmd) runSpaces(printer upterm.ObjectPrinter, p pterm.TextPrinter, kube *dynamic.DynamicClient, upCtx *upbound.Context) error {
+	// NOTE(branden): It would be convenient if we could import the
+	// ControlPlane types and SchemeBuilder from upbound/mxe and use them to
+	// build a client that returns structured data, but it's a private repo.
+	// Instead we use a dynamic client and unstructured objects.
+	ctx := context.Background()
+	gvr := schema.GroupVersionResource{
+		Group:    "spaces.upbound.io",
+		Version:  "v1alpha1",
+		Resource: "controlplanes",
+	}
+	ctps, err := kube.Resource(gvr).List(ctx, v1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	if len(ctps.Items) == 0 {
+		p.Println("No control planes found")
+		return nil
+	}
+	return printer.Print(ctps.Items, []string{"NAME"}, func(obj any) []string {
+		c := obj.(unstructured.Unstructured)
+		return []string{c.GetName()}
+	})
 }
 
 func extractFields(obj any) []string {
